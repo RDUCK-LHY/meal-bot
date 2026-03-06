@@ -3,3 +3,5 @@ requests
 gunicorn
 google-cloud-vision
 pillow
+opencv-python-headless
+numpy
