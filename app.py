@@ -563,8 +563,7 @@ def webhook():
 
 @app.route("/cron/send", methods=["GET"])
 def cron_send():
-    if request.args.get("secret", "") != CRON_SECRET:
-        return "forbidden", 403
+    return f"url_secret={request.args.get('secret','')} / env_secret={CRON_SECRET}", 200
 
     meal = request.args.get("meal", "")
     if meal not in ("breakfast", "lunch", "dinner"):
