@@ -9,12 +9,9 @@ import requests
 from PIL import Image
 from google.cloud import vision
 
-# ============================================================
-# ENV
-# ============================================================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")          # -100...
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))    # 관리자 텔레그램 user id
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 GCP_SA_JSON = os.getenv("GCP_SA_JSON")
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
@@ -25,9 +22,7 @@ DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_KR = {"mon": "월", "tue": "화", "wed": "수", "thu": "목", "fri": "금", "sat": "토", "sun": "일"}
 MEAL_NAME = {"breakfast": "아침", "lunch": "점심", "dinner": "저녁"}
 
-# ============================================================
-# 템플릿 고정 기반 큰 영역 crop
-# ============================================================
+# 템플릿 고정 기준
 CROP = {
     "table_left": 0.05,
     "table_top": 0.10,
@@ -37,7 +32,11 @@ CROP = {
     "days_left": 0.12,
     "days_right": 0.995,
 
-    # 관리직 기준 사용 블록
+    # 상단 날짜 헤더
+    "header_top": 0.00,
+    "header_bottom": 0.08,
+
+    # 관리직 기준 사용할 행
     "breakfast_top": 0.08,
     "breakfast_bottom": 0.28,
 
@@ -48,9 +47,6 @@ CROP = {
     "dinner_bottom": 0.93,
 }
 
-# ============================================================
-# 노이즈 제거
-# ============================================================
 NOISE_EXACT = {"한식", "일품", "공통", "SELF", "PLUS", "오늘의차"}
 NOISE_CONTAINS = [
     "공통", "SELF", "PLUS", "오늘의차",
@@ -62,9 +58,6 @@ NOISE_CONTAINS = [
 
 SPECIAL_SPLIT_HINTS = ["특식", "분식", "DAY", "NEW"]
 
-# ============================================================
-# 메인메뉴 추정
-# ============================================================
 MAIN_HINTS = [
     "국", "찌개", "탕", "전골", "순두부", "육개장", "설렁탕", "감자탕", "부대찌개", "미역국", "된장",
     "덮밥", "비빔밥", "볶음밥", "카레", "짜장", "짬뽕", "우동", "국수", "라면",
@@ -77,25 +70,22 @@ NOT_MAIN_HINTS = [
     "소스", "케찹", "드레싱", "피클", "초장", "양념장"
 ]
 
-# ============================================================
-# 시간
-# ============================================================
+
 def kst_now() -> datetime:
     return datetime.utcnow() + timedelta(hours=9)
+
 
 def today_kst_date() -> date:
     return kst_now().date()
 
-# ============================================================
-# Telegram helpers
-# ============================================================
+
 def tg_send(text: str, keyboard: dict | None = None):
     data = {"chat_id": CHANNEL_ID, "text": text}
     if keyboard is not None:
         data["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
     r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", data=data, timeout=20)
     r.raise_for_status()
-    return r.json()
+
 
 def tg_edit(chat_id, message_id, text: str, keyboard: dict | None = None):
     data = {"chat_id": chat_id, "message_id": message_id, "text": text}
@@ -103,7 +93,7 @@ def tg_edit(chat_id, message_id, text: str, keyboard: dict | None = None):
         data["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
     r = requests.post(f"https://api.telegram.org/bot{TOKEN}/editMessageText", data=data, timeout=20)
     r.raise_for_status()
-    return r.json()
+
 
 def tg_answer_callback(callback_query_id: str):
     requests.post(
@@ -111,6 +101,7 @@ def tg_answer_callback(callback_query_id: str):
         data={"callback_query_id": callback_query_id},
         timeout=10,
     )
+
 
 def download_telegram_photo(file_id: str) -> bytes:
     r = requests.get(
@@ -128,9 +119,7 @@ def download_telegram_photo(file_id: str) -> bytes:
     img.raise_for_status()
     return img.content
 
-# ============================================================
-# Vision OCR
-# ============================================================
+
 def vision_client() -> vision.ImageAnnotatorClient:
     if not GCP_SA_JSON:
         raise RuntimeError("GCP_SA_JSON env var is missing")
@@ -142,6 +131,7 @@ def vision_client() -> vision.ImageAnnotatorClient:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = sa_path
     return vision.ImageAnnotatorClient()
 
+
 def ocr_document(client: vision.ImageAnnotatorClient, image_bytes: bytes):
     image = vision.Image(content=image_bytes)
     resp = client.document_text_detection(image=image)
@@ -149,12 +139,11 @@ def ocr_document(client: vision.ImageAnnotatorClient, image_bytes: bytes):
         raise RuntimeError(resp.error.message)
     return resp
 
-# ============================================================
-# Image helpers
-# ============================================================
+
 def crop_by_ratio(img: Image.Image, l: float, t: float, r: float, b: float) -> Image.Image:
     w, h = img.size
     return img.crop((int(w * l), int(h * t), int(w * r), int(h * b)))
+
 
 def to_png_bytes(img: Image.Image, scale: int = 2) -> bytes:
     img2 = img.resize((img.size[0] * scale, img.size[1] * scale))
@@ -162,9 +151,7 @@ def to_png_bytes(img: Image.Image, scale: int = 2) -> bytes:
     img2.save(buf, format="PNG")
     return buf.getvalue()
 
-# ============================================================
-# Text cleaning / main menu
-# ============================================================
+
 def clean_lines(text: str) -> list[str]:
     lines = []
     for raw in text.splitlines():
@@ -197,11 +184,13 @@ def clean_lines(text: str) -> list[str]:
             seen.add(x)
     return uniq
 
+
 def is_not_main(line: str) -> bool:
     for x in NOT_MAIN_HINTS:
         if x in line:
             return True
     return False
+
 
 def score_main(line: str) -> int:
     s = 0
@@ -217,6 +206,7 @@ def score_main(line: str) -> int:
         s -= 1
     return s
 
+
 def pick_main_menu(lines: list[str]) -> str:
     if not lines:
         return "메뉴 정보 없음"
@@ -227,6 +217,7 @@ def pick_main_menu(lines: list[str]) -> str:
         return lines[0]
     return best_line
 
+
 def normalize_menu_list(lines: list[str]) -> list[str]:
     if not lines:
         return lines
@@ -235,11 +226,8 @@ def normalize_menu_list(lines: list[str]) -> list[str]:
         return [main] + [x for x in lines if x != main]
     return lines
 
+
 def split_special_menu(lines: list[str]) -> tuple[list[str], list[str]]:
-    """
-    점심 한식 OCR 안에 특식/분식DAY류가 섞였을 때 분리.
-    반환: (han, special)
-    """
     han = []
     special = []
     special_mode = False
@@ -256,69 +244,81 @@ def split_special_menu(lines: list[str]) -> tuple[list[str], list[str]]:
 
     return han, special
 
-# ============================================================
-# 날짜 추출 / 주 시작일 계산
-# ============================================================
-def extract_date_triplets(text: str) -> list[tuple[int, int, str]]:
-    """
-    예: 3월 9일 월요일 -> (3, 9, '월')
-    """
-    matches = re.findall(r"(\d{1,2})\s*월\s*(\d{1,2})\s*일\s*(월|화|수|목|금|토|일)\s*요일", text)
-    out = []
-    for m in matches:
-        out.append((int(m[0]), int(m[1]), m[2]))
-    return out
 
-def extract_date_range(text: str) -> str | None:
-    dates = extract_date_triplets(text)
-    if len(dates) >= 2:
-        s = dates[0]
-        e = dates[-1]
-        return f"{s[0]}/{s[1]}({s[2]}) ~ {e[0]}/{e[1]}({e[2]})"
+def extract_mmdd_from_text(text: str):
+    patterns = [
+        r"(\d{1,2})\s*월\s*(\d{1,2})\s*일",
+        r"(\d{1,2})\s*/\s*(\d{1,2})",
+        r"(\d{1,2})\s*\.\s*(\d{1,2})",
+    ]
+    for p in patterns:
+        m = re.search(p, text)
+        if m:
+            return int(m.group(1)), int(m.group(2))
     return None
 
-def infer_week_start_from_ocr(text: str) -> date:
-    """
-    업로드한 식단표의 시작일(보통 월요일)을 추정.
-    연도는 현재 KST 기준 연도 사용.
-    연말/연초 경계는 단순 처리.
-    """
-    dates = extract_date_triplets(text)
+
+def extract_header_dates(img: Image.Image, client: vision.ImageAnnotatorClient):
+    table = crop_by_ratio(
+        img,
+        CROP["table_left"],
+        CROP["table_top"],
+        CROP["table_right"],
+        CROP["table_bottom"]
+    )
+
+    days_area = crop_by_ratio(
+        table,
+        CROP["days_left"],
+        0.0,
+        CROP["days_right"],
+        1.0
+    )
+
+    W, H = days_area.size
+    col_w = W / 7.0
+
+    results = {}
+
+    for i, dk in enumerate(DAY_KEYS):
+        x0 = int(col_w * i)
+        x1 = int(col_w * (i + 1))
+        y0 = int(H * CROP["header_top"])
+        y1 = int(H * CROP["header_bottom"])
+
+        cell = days_area.crop((x0, y0, x1, y1))
+        resp = ocr_document(client, to_png_bytes(cell, scale=3))
+        text = resp.full_text_annotation.text if resp.full_text_annotation else ""
+
+        mmdd = extract_mmdd_from_text(text)
+        if mmdd:
+            results[dk] = mmdd
+
+    return results
+
+
+def build_range_and_week_start_from_header(header_dates: dict):
     today = today_kst_date()
     year = today.year
 
-    if not dates:
-        # 못 찾으면 "오늘이 속한 주의 월요일"로 fallback
-        return today - timedelta(days=today.weekday())
+    if "mon" not in header_dates:
+        ws = today - timedelta(days=today.weekday())
+        return "", ws
 
-    first_month, first_day, _ = dates[0]
+    mon_m, mon_d = header_dates["mon"]
+    sun_m, sun_d = header_dates.get("sun", header_dates["mon"])
 
-    try:
-        candidate = date(year, first_month, first_day)
-    except ValueError:
-        return today - timedelta(days=today.weekday())
+    week_start = date(year, mon_m, mon_d)
 
-    # 연말/연초 보정
-    if candidate.month == 12 and today.month == 1:
-        candidate = date(year - 1, first_month, first_day)
-    elif candidate.month == 1 and today.month == 12:
-        candidate = date(year + 1, first_month, first_day)
+    if mon_m == 12 and today.month == 1:
+        week_start = date(year - 1, mon_m, mon_d)
+    elif mon_m == 1 and today.month == 12:
+        week_start = date(year + 1, mon_m, mon_d)
 
-    return candidate
+    range_text = f"{mon_m}/{mon_d}(월) ~ {sun_m}/{sun_d}(일)"
+    return range_text, week_start
 
-def day_key_from_week_start(week_start: date, offset_days: int = 0) -> str:
-    target = today_kst_date() + timedelta(days=offset_days)
-    delta = (target - week_start).days
 
-    # 업로드된 주 범위 밖이면 target의 실제 요일 fallback
-    if delta < 0 or delta > 6:
-        return DAY_KEYS[target.weekday()]
-
-    return DAY_KEYS[delta]
-
-# ============================================================
-# OCR 좌표 기반 점심 한식/일품 분리
-# ============================================================
 def _iter_words_with_boxes(resp):
     if not resp.full_text_annotation or not resp.full_text_annotation.pages:
         return
@@ -332,11 +332,14 @@ def _iter_words_with_boxes(resp):
                     bbox = word.bounding_box.vertices
                     yield wtxt, bbox
 
+
 def _bbox_bottom_y(bbox) -> int:
     return max(v.y for v in bbox if v.y is not None)
 
+
 def _bbox_top_y(bbox) -> int:
     return min(v.y for v in bbox if v.y is not None)
+
 
 def find_label_y(resp, label: str) -> tuple[int | None, int | None]:
     candidates = []
@@ -348,11 +351,8 @@ def find_label_y(resp, label: str) -> tuple[int | None, int | None]:
     candidates.sort(key=lambda x: x[0])
     return candidates[0]
 
+
 def split_lunch_by_labels(lunch_img: Image.Image, client: vision.ImageAnnotatorClient):
-    """
-    점심 블록에서 '한식', '일품' 라벨의 y좌표를 잡아서 분리.
-    못 잡으면 반반 fallback.
-    """
     scale = 2
     resp = ocr_document(client, to_png_bytes(lunch_img, scale=scale))
     han_top, han_bottom = find_label_y(resp, "한식")
@@ -380,12 +380,11 @@ def split_lunch_by_labels(lunch_img: Image.Image, client: vision.ImageAnnotatorC
     il_menu = lunch_img.crop((0, il_menu_top, W, H))
     return han_menu, il_menu
 
-# ============================================================
-# Storage
-# ============================================================
+
 def save_meals(data: dict):
     with open(MEALS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
 
 def load_meals() -> dict:
     if not os.path.exists(MEALS_FILE):
@@ -405,9 +404,7 @@ def load_meals() -> dict:
     except Exception:
         return {"range": "", "week_start": "", "days": {}}
 
-# ============================================================
-# Parse weekly menu
-# ============================================================
+
 def parse_weekly(image_bytes: bytes) -> dict:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
@@ -426,11 +423,8 @@ def parse_weekly(image_bytes: bytes) -> dict:
         } for dk in DAY_KEYS
     }
 
-    # 날짜 / 주 시작일
-    full_resp = ocr_document(client, to_png_bytes(img, scale=2))
-    full_text = full_resp.full_text_annotation.text if full_resp.full_text_annotation else ""
-    date_range = extract_date_range(full_text) or "날짜 인식 실패"
-    week_start = infer_week_start_from_ocr(full_text)
+    header_dates = extract_header_dates(img, client)
+    date_range, week_start = build_range_and_week_start_from_header(header_dates)
 
     bf_y0, bf_y1 = int(H * CROP["breakfast_top"]), int(H * CROP["breakfast_bottom"])
     ln_y0, ln_y1 = int(H * CROP["lunch_top"]), int(H * CROP["lunch_bottom"])
@@ -439,13 +433,11 @@ def parse_weekly(image_bytes: bytes) -> dict:
     for i, dk in enumerate(DAY_KEYS):
         x0, x1 = int(col_w * i), int(col_w * (i + 1))
 
-        # breakfast
         bf_cell = days_area.crop((x0, bf_y0, x1, bf_y1))
         bf_resp = ocr_document(client, to_png_bytes(bf_cell, scale=2))
         bf_text = bf_resp.full_text_annotation.text if bf_resp.full_text_annotation else ""
         out[dk]["breakfast"]["han"] = normalize_menu_list(clean_lines(bf_text))
 
-        # lunch
         ln_block = days_area.crop((x0, ln_y0, x1, ln_y1))
         han_img, il_img = split_lunch_by_labels(ln_block, client)
 
@@ -457,7 +449,6 @@ def parse_weekly(image_bytes: bytes) -> dict:
         han_lines = normalize_menu_list(clean_lines(han_text))
         il_lines = normalize_menu_list(clean_lines(il_text))
 
-        # 한식 OCR 안에 분식DAY/특식 등이 섞였으면 추가 분리
         han_clean, special_lines = split_special_menu(han_lines)
         if special_lines:
             han_lines = normalize_menu_list(han_clean)
@@ -467,22 +458,30 @@ def parse_weekly(image_bytes: bytes) -> dict:
         out[dk]["lunch"]["han"] = han_lines
         out[dk]["lunch"]["ilpum"] = il_lines
 
-        # dinner
         dn_cell = days_area.crop((x0, dn_y0, x1, dn_y1))
         dn_resp = ocr_document(client, to_png_bytes(dn_cell, scale=2))
         dn_text = dn_resp.full_text_annotation.text if dn_resp.full_text_annotation else ""
         out[dk]["dinner"]["han"] = normalize_menu_list(clean_lines(dn_text))
 
     return {
-        "range": date_range,
+        "range": date_range if date_range else "날짜 인식 실패",
         "week_start": week_start.isoformat(),
         "saved_at_kst": kst_now().isoformat(timespec="seconds"),
         "days": out,
     }
 
-# ============================================================
-# 현재 보여줄 요일 계산
-# ============================================================
+
+def day_key_from_week_start(week_start: date, offset_days: int = 0) -> str:
+    target = today_kst_date() + timedelta(days=offset_days)
+    delta = (target - week_start).days
+
+    if delta < 0:
+        return DAY_KEYS[0]
+    if delta > 6:
+        return DAY_KEYS[6]
+    return DAY_KEYS[delta]
+
+
 def get_active_day_key(offset_days: int = 0) -> str:
     data = load_meals()
     week_start_str = data.get("week_start", "")
@@ -492,13 +491,10 @@ def get_active_day_key(offset_days: int = 0) -> str:
             return day_key_from_week_start(ws, offset_days)
         except Exception:
             pass
-    # fallback
     target = today_kst_date() + timedelta(days=offset_days)
     return DAY_KEYS[target.weekday()]
 
-# ============================================================
-# UI
-# ============================================================
+
 def format_meal_full(day_selector: str, meal_key: str, option: str | None = None) -> str:
     label = "오늘" if day_selector == "today" else "내일"
     data = load_meals()
@@ -523,6 +519,7 @@ def format_meal_full(day_selector: str, meal_key: str, option: str | None = None
         return header + "\n\n(메뉴 없음/파싱 실패)"
     return header + "\n\n" + "\n".join(menu)
 
+
 def next_buttons(day_selector: str, meal_key: str) -> dict:
     if day_selector == "today" and meal_key == "breakfast":
         return {"inline_keyboard": [[
@@ -544,9 +541,7 @@ def next_buttons(day_selector: str, meal_key: str) -> dict:
         ]]}
     return {"inline_keyboard": []}
 
-# ============================================================
-# Alerts
-# ============================================================
+
 def send_meal_alert(meal_key: str):
     if meal_key not in ("breakfast", "lunch", "dinner"):
         tg_send("⚠️ cron 호출 오류: meal 파라미터가 잘못됐어요.")
@@ -587,12 +582,11 @@ def send_meal_alert(meal_key: str):
     ]]}
     tg_send(text, keyboard)
 
+
 def remind_upload():
     tg_send("📸 이번 주 식단표 사진을 업로드해주세요! (관리자만 업로드 가능)")
 
-# ============================================================
-# Routes
-# ============================================================
+
 @app.route("/", methods=["POST"])
 def webhook():
     data = request.json or {}
@@ -647,6 +641,7 @@ def webhook():
 
     return "ok"
 
+
 @app.route("/cron/send", methods=["GET"])
 def cron_send():
     if request.args.get("secret", "") != CRON_SECRET:
@@ -662,6 +657,7 @@ def cron_send():
     except Exception as e:
         return f"error: {type(e).__name__}", 500
 
+
 @app.route("/cron/remind_upload", methods=["GET"])
 def cron_remind_upload():
     if request.args.get("secret", "") != CRON_SECRET:
@@ -672,9 +668,11 @@ def cron_remind_upload():
     except Exception as e:
         return f"error: {type(e).__name__}", 500
 
+
 @app.route("/health", methods=["GET"])
 def health():
     return "ok", 200
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
