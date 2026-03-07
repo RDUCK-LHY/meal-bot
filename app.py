@@ -37,7 +37,7 @@ MEAL_NAME = {
 }
 
 # =========================================================
-# TEMPLATE RATIOS (based on your sample sheets)
+# TEMPLATE RATIOS (based on your menu samples)
 # =========================================================
 
 X_REL = np.array([126, 253, 380, 507, 634, 761, 888, 1014], dtype=np.float32) / 1015.0
@@ -104,12 +104,17 @@ def escape_html(text: str) -> str:
 
 def load_meals():
     if not os.path.exists(MEALS_FILE):
-        return {"days": {}}
+        return {"days": {}, "range": ""}
     try:
         with open(MEALS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        if "days" not in data:
+            data["days"] = {}
+        if "range" not in data:
+            data["range"] = ""
+        return data
     except Exception:
-        return {"days": {}}
+        return {"days": {}, "range": ""}
 
 def save_meals(data):
     with open(MEALS_FILE, "w", encoding="utf-8") as f:
@@ -152,19 +157,27 @@ def tg_edit(chat, message, text, keyboard=None):
         timeout=20
     )
 
+def tg_answer_callback(callback_query_id: str):
+    requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery",
+        data={"callback_query_id": callback_query_id},
+        timeout=10
+    )
+
 def download_photo(file_id):
     r = requests.get(
         f"https://api.telegram.org/bot{TOKEN}/getFile",
         params={"file_id": file_id},
         timeout=20
     )
+    r.raise_for_status()
     file_path = r.json()["result"]["file_path"]
 
     img = requests.get(
         f"https://api.telegram.org/file/bot{TOKEN}/{file_path}",
         timeout=30
     )
-
+    img.raise_for_status()
     return img.content
 
 # =========================================================
@@ -216,7 +229,6 @@ def clean_lines(text):
 
         lines.append(s)
 
-    # order preserved, dedupe
     out = []
     seen = set()
     for x in lines:
@@ -286,11 +298,6 @@ def pil_to_cv(img):
 # =========================================================
 
 def detect_left_lunch_boundaries(img: Image.Image):
-    """
-    lunch 전체칸에서 좌측 시간표 기준
-    1) 한식/일품 경계
-    2) 일품/공통 경계
-    """
     cv_img = pil_to_cv(img)
     h, w = cv_img.shape[:2]
 
@@ -459,7 +466,6 @@ def parse_week(image_bytes):
     days = {}
 
     for i, dk in enumerate(DAY_KEYS):
-
         bf_img = img.crop(breakfast_boxes[i])
         bf_lines = clean_lines(ocr_text(client, bf_img))
 
@@ -499,7 +505,7 @@ def parse_week(image_bytes):
     }
 
 # =========================================================
-# FORMATTERS
+# FORMATTERS (stored data only)
 # =========================================================
 
 def format_lunch_by_day(day_offset: int):
@@ -507,18 +513,22 @@ def format_lunch_by_day(day_offset: int):
     dk = day_key_with_offset(day_offset)
     day = data.get("days", {}).get(dk, {})
     lunch = day.get("lunch", {})
+    rng = data.get("range", "")
 
     label = "오늘" if day_offset == 0 else "내일"
+    header = f"📋 {label} 점심 메뉴"
+    if rng:
+        header += f"\n(저장된 식단표: {escape_html(rng)})"
 
     if lunch.get("mode") == "dual":
         return (
-            f"📋 {label} 점심 메뉴\n\n"
+            f"{header}\n\n"
             f"[한식]\n{bold_main(lunch.get('han', []))}\n\n"
             f"[일품]\n{bold_main(lunch.get('ilpum', []))}"
         )
 
     return (
-        f"📋 {label} 점심 메뉴\n\n"
+        f"{header}\n\n"
         f"{bold_main(lunch.get('han', []))}"
     )
 
@@ -526,6 +536,7 @@ def format_meal_by_day(day_offset: int, meal: str):
     data = load_meals()
     dk = day_key_with_offset(day_offset)
     day = data.get("days", {}).get(dk, {})
+    rng = data.get("range", "")
 
     label = "오늘" if day_offset == 0 else "내일"
 
@@ -533,15 +544,18 @@ def format_meal_by_day(day_offset: int, meal: str):
         return format_lunch_by_day(day_offset)
 
     menu = day.get(meal, {}).get("han", [])
+    header = f"📋 {label} {MEAL_NAME[meal]} 메뉴"
+    if rng:
+        header += f"\n(저장된 식단표: {escape_html(rng)})"
 
-    return f"📋 {label} {MEAL_NAME[meal]} 메뉴\n\n{bold_main(menu)}"
+    return f"{header}\n\n{bold_main(menu)}"
 
 # =========================================================
-# USER TEXT PARSER
+# STRICT USER COMMANDS
 # =========================================================
 
 def parse_user_question(text: str):
-    s = text.strip().replace(" ", "")
+    s = text.strip().replace(" ", "").replace('"', "").replace("“", "").replace("”", "")
 
     mapping = {
         "오늘아침": (0, "breakfast"),
@@ -555,6 +569,26 @@ def parse_user_question(text: str):
     return mapping.get(s)
 
 # =========================================================
+# CALLBACK HELPERS
+# =========================================================
+
+def next_buttons(meal: str):
+    if meal == "breakfast":
+        return {"inline_keyboard": [[
+            {"text": "오늘 점심", "callback_data": "cmd|today_lunch"},
+            {"text": "오늘 저녁", "callback_data": "cmd|today_dinner"},
+        ]]}
+    if meal == "lunch":
+        return {"inline_keyboard": [[
+            {"text": "오늘 저녁", "callback_data": "cmd|today_dinner"},
+        ]]}
+    if meal == "dinner":
+        return {"inline_keyboard": [[
+            {"text": "내일 아침", "callback_data": "cmd|tomorrow_breakfast"},
+        ]]}
+    return None
+
+# =========================================================
 # WEBHOOK
 # =========================================================
 
@@ -562,58 +596,73 @@ def parse_user_question(text: str):
 def webhook():
     data = request.json or {}
 
+    incoming = None
     if "message" in data:
-        msg = data["message"]
+        incoming = data["message"]
+    elif "channel_post" in data:
+        incoming = data["channel_post"]
 
-        # photo upload
-        if "photo" in msg:
-            if msg.get("from", {}).get("id") != ADMIN_ID:
+    if incoming:
+        # 1) 관리자 사진 업로드 -> OCR/이미지 처리 여기서만
+        if "photo" in incoming:
+            if incoming.get("from", {}).get("id") != ADMIN_ID:
                 return "ok"
 
-            file_id = msg["photo"][-1]["file_id"]
-            img_bytes = download_photo(file_id)
+            try:
+                file_id = incoming["photo"][-1]["file_id"]
+                img_bytes = download_photo(file_id)
 
-            parsed = parse_week(img_bytes)
-            save_meals(parsed)
+                parsed = parse_week(img_bytes)
+                save_meals(parsed)
 
-            tg_send("📅 식단표 저장 완료")
+                tg_send("📅 식단표 저장 완료", chat_id=incoming["chat"]["id"])
+            except Exception as e:
+                tg_send(
+                    f"⚠️ 업로드/파싱 오류: {escape_html(type(e).__name__)}",
+                    chat_id=incoming["chat"]["id"]
+                )
+
             return "ok"
 
-        # text query
-        if "text" in msg:
-            parsed_q = parse_user_question(msg["text"])
+        # 2) 텍스트 질의 -> 저장된 값만 사용
+        if "text" in incoming:
+            parsed_q = parse_user_question(incoming["text"])
 
-            if parsed_q:
-                offset_days, meal = parsed_q
-                reply = format_meal_by_day(offset_days, meal)
-                tg_send(reply, chat_id=msg["chat"]["id"])
+            # 딱 6개 명령어 외에는 무반응
+            if not parsed_q:
                 return "ok"
+
+            offset_days, meal = parsed_q
+            reply = format_meal_by_day(offset_days, meal)
+
+            tg_send(reply, chat_id=incoming["chat"]["id"])
+            return "ok"
 
     if "callback_query" in data:
         q = data["callback_query"]
-
         cmd = q["data"]
         chat = q["message"]["chat"]["id"]
         mid = q["message"]["message_id"]
 
-        tg_answer_callback = requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery",
-            data={"callback_query_id": q["id"]}
-        )
+        tg_answer_callback(q["id"])
 
-        if cmd == "lunch":
-            tg_edit(chat, mid, format_lunch_by_day(0))
-
-        elif cmd == "dinner":
-            tg_edit(chat, mid, format_meal_by_day(0, "dinner"))
-
-        elif cmd == "breakfast":
-            tg_edit(chat, mid, format_meal_by_day(0, "breakfast"))
+        if cmd == "cmd|today_breakfast":
+            tg_edit(chat, mid, format_meal_by_day(0, "breakfast"), next_buttons("breakfast"))
+        elif cmd == "cmd|today_lunch":
+            tg_edit(chat, mid, format_meal_by_day(0, "lunch"), next_buttons("lunch"))
+        elif cmd == "cmd|today_dinner":
+            tg_edit(chat, mid, format_meal_by_day(0, "dinner"), next_buttons("dinner"))
+        elif cmd == "cmd|tomorrow_breakfast":
+            tg_edit(chat, mid, format_meal_by_day(1, "breakfast"))
+        elif cmd == "cmd|tomorrow_lunch":
+            tg_edit(chat, mid, format_meal_by_day(1, "lunch"))
+        elif cmd == "cmd|tomorrow_dinner":
+            tg_edit(chat, mid, format_meal_by_day(1, "dinner"))
 
     return "ok"
 
 # =========================================================
-# CRON
+# CRON (stored values only)
 # =========================================================
 
 @app.route("/cron/send")
