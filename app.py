@@ -5,7 +5,7 @@ import re
 import json
 import requests
 import tempfile
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 import cv2
@@ -37,7 +37,7 @@ MEAL_NAME = {
 }
 
 # =========================================================
-# TEMPLATE RATIOS (based on your menu samples)
+# TEMPLATE RATIOS (based on your samples)
 # =========================================================
 
 X_REL = np.array([126, 253, 380, 507, 634, 761, 888, 1014], dtype=np.float32) / 1015.0
@@ -134,11 +134,12 @@ def tg_send(text: str, keyboard: Optional[dict] = None, chat_id: Optional[str] =
     if keyboard:
         data["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
 
-    requests.post(
+    r = requests.post(
         f"https://api.telegram.org/bot{TOKEN}/sendMessage",
         data=data,
         timeout=20
     )
+    r.raise_for_status()
 
 def tg_edit(chat, message, text, keyboard=None):
     data = {
@@ -151,18 +152,42 @@ def tg_edit(chat, message, text, keyboard=None):
     if keyboard:
         data["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
 
-    requests.post(
+    r = requests.post(
         f"https://api.telegram.org/bot{TOKEN}/editMessageText",
         data=data,
         timeout=20
     )
+    r.raise_for_status()
+
+def tg_send_photo(photo_bytes: bytes, caption: str = "", chat_id: Optional[str] = None, keyboard: Optional[dict] = None):
+    data = {
+        "chat_id": chat_id or CHANNEL_ID,
+        "caption": caption,
+        "parse_mode": "HTML",
+    }
+
+    if keyboard:
+        data["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
+
+    files = {
+        "photo": ("menu.jpg", photo_bytes, "image/jpeg")
+    }
+
+    r = requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
+        data=data,
+        files=files,
+        timeout=60
+    )
+    r.raise_for_status()
 
 def tg_answer_callback(callback_query_id: str):
-    requests.post(
+    r = requests.post(
         f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery",
         data={"callback_query_id": callback_query_id},
         timeout=10
     )
+    r.raise_for_status()
 
 def download_photo(file_id):
     r = requests.get(
@@ -569,7 +594,7 @@ def parse_user_question(text: str):
     return mapping.get(s)
 
 # =========================================================
-# CALLBACK HELPERS
+# CALLBACK BUTTONS
 # =========================================================
 
 def next_buttons(meal: str):
@@ -615,7 +640,30 @@ def webhook():
                 parsed = parse_week(img_bytes)
                 save_meals(parsed)
 
+                # 업로드한 관리자에게는 텍스트만
                 tg_send("📅 식단표 저장 완료", chat_id=incoming["chat"]["id"])
+
+                # 채널에는 사진 + 캡션 + 버튼
+                rng = escape_html(parsed.get("range", ""))
+                caption = "📅 <b>식단표 저장 완료</b>"
+                if rng:
+                    caption += f"\n{rng}"
+
+                keyboard = {
+                    "inline_keyboard": [[
+                        {"text": "오늘 아침", "callback_data": "cmd|today_breakfast"},
+                        {"text": "오늘 점심", "callback_data": "cmd|today_lunch"},
+                        {"text": "오늘 저녁", "callback_data": "cmd|today_dinner"},
+                    ]]
+                }
+
+                tg_send_photo(
+                    photo_bytes=img_bytes,
+                    caption=caption,
+                    chat_id=CHANNEL_ID,
+                    keyboard=keyboard
+                )
+
             except Exception as e:
                 tg_send(
                     f"⚠️ 업로드/파싱 오류: {escape_html(type(e).__name__)}",
