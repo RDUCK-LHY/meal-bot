@@ -124,15 +124,12 @@ def save_meals(data):
 # TELEGRAM
 # =========================================================
 
-def tg_send(text: str, keyboard: Optional[dict] = None, chat_id: Optional[str] = None):
+def tg_send(text: str, chat_id: Optional[str] = None):
     data = {
         "chat_id": chat_id or CHANNEL_ID,
         "text": text,
         "parse_mode": "HTML"
     }
-
-    if keyboard:
-        data["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
 
     r = requests.post(
         f"https://api.telegram.org/bot{TOKEN}/sendMessage",
@@ -141,33 +138,12 @@ def tg_send(text: str, keyboard: Optional[dict] = None, chat_id: Optional[str] =
     )
     r.raise_for_status()
 
-def tg_edit(chat, message, text, keyboard=None):
-    data = {
-        "chat_id": chat,
-        "message_id": message,
-        "text": text,
-        "parse_mode": "HTML"
-    }
-
-    if keyboard:
-        data["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
-
-    r = requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/editMessageText",
-        data=data,
-        timeout=20
-    )
-    r.raise_for_status()
-
-def tg_send_photo(photo_bytes: bytes, caption: str = "", chat_id: Optional[str] = None, keyboard: Optional[dict] = None):
+def tg_send_photo(photo_bytes: bytes, caption: str = "", chat_id: Optional[str] = None):
     data = {
         "chat_id": chat_id or CHANNEL_ID,
         "caption": caption,
         "parse_mode": "HTML",
     }
-
-    if keyboard:
-        data["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
 
     files = {
         "photo": ("menu.jpg", photo_bytes, "image/jpeg")
@@ -178,14 +154,6 @@ def tg_send_photo(photo_bytes: bytes, caption: str = "", chat_id: Optional[str] 
         data=data,
         files=files,
         timeout=60
-    )
-    r.raise_for_status()
-
-def tg_answer_callback(callback_query_id: str):
-    r = requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery",
-        data={"callback_query_id": callback_query_id},
-        timeout=10
     )
     r.raise_for_status()
 
@@ -576,7 +544,7 @@ def format_meal_by_day(day_offset: int, meal: str):
     return f"{header}\n\n{bold_main(menu)}"
 
 # =========================================================
-# STRICT USER COMMANDS
+# STRICT USER COMMANDS (private chat only)
 # =========================================================
 
 def parse_user_question(text: str):
@@ -594,26 +562,6 @@ def parse_user_question(text: str):
     return mapping.get(s)
 
 # =========================================================
-# CALLBACK BUTTONS
-# =========================================================
-
-def next_buttons(meal: str):
-    if meal == "breakfast":
-        return {"inline_keyboard": [[
-            {"text": "오늘 점심", "callback_data": "cmd|today_lunch"},
-            {"text": "오늘 저녁", "callback_data": "cmd|today_dinner"},
-        ]]}
-    if meal == "lunch":
-        return {"inline_keyboard": [[
-            {"text": "오늘 저녁", "callback_data": "cmd|today_dinner"},
-        ]]}
-    if meal == "dinner":
-        return {"inline_keyboard": [[
-            {"text": "내일 아침", "callback_data": "cmd|tomorrow_breakfast"},
-        ]]}
-    return None
-
-# =========================================================
 # WEBHOOK
 # =========================================================
 
@@ -628,7 +576,9 @@ def webhook():
         incoming = data["channel_post"]
 
     if incoming:
-        # 1) 관리자 사진 업로드 -> OCR/이미지 처리 여기서만
+        chat_type = incoming.get("chat", {}).get("type", "")
+
+        # 관리자 사진 업로드 -> OCR/이미지 처리 여기서만
         if "photo" in incoming:
             if incoming.get("from", {}).get("id") != ADMIN_ID:
                 return "ok"
@@ -640,28 +590,19 @@ def webhook():
                 parsed = parse_week(img_bytes)
                 save_meals(parsed)
 
-                # 업로드한 관리자에게는 텍스트만
+                # 관리자에게는 텍스트만
                 tg_send("📅 식단표 저장 완료", chat_id=incoming["chat"]["id"])
 
-                # 채널에는 사진 + 캡션 + 버튼
+                # 채널에는 사진 + 캡션만
                 rng = escape_html(parsed.get("range", ""))
                 caption = "📅 <b>식단표 저장 완료</b>"
                 if rng:
                     caption += f"\n{rng}"
 
-                keyboard = {
-                    "inline_keyboard": [[
-                        {"text": "오늘 아침", "callback_data": "cmd|today_breakfast"},
-                        {"text": "오늘 점심", "callback_data": "cmd|today_lunch"},
-                        {"text": "오늘 저녁", "callback_data": "cmd|today_dinner"},
-                    ]]
-                }
-
                 tg_send_photo(
                     photo_bytes=img_bytes,
                     caption=caption,
-                    chat_id=CHANNEL_ID,
-                    keyboard=keyboard
+                    chat_id=CHANNEL_ID
                 )
 
             except Exception as e:
@@ -672,11 +613,12 @@ def webhook():
 
             return "ok"
 
-        # 2) 텍스트 질의 -> 저장된 값만 사용
+        # 텍스트 질의 -> private chat에서만 허용
         if "text" in incoming:
-            parsed_q = parse_user_question(incoming["text"])
+            if chat_type != "private":
+                return "ok"
 
-            # 딱 6개 명령어 외에는 무반응
+            parsed_q = parse_user_question(incoming["text"])
             if not parsed_q:
                 return "ok"
 
@@ -685,27 +627,6 @@ def webhook():
 
             tg_send(reply, chat_id=incoming["chat"]["id"])
             return "ok"
-
-    if "callback_query" in data:
-        q = data["callback_query"]
-        cmd = q["data"]
-        chat = q["message"]["chat"]["id"]
-        mid = q["message"]["message_id"]
-
-        tg_answer_callback(q["id"])
-
-        if cmd == "cmd|today_breakfast":
-            tg_edit(chat, mid, format_meal_by_day(0, "breakfast"), next_buttons("breakfast"))
-        elif cmd == "cmd|today_lunch":
-            tg_edit(chat, mid, format_meal_by_day(0, "lunch"), next_buttons("lunch"))
-        elif cmd == "cmd|today_dinner":
-            tg_edit(chat, mid, format_meal_by_day(0, "dinner"), next_buttons("dinner"))
-        elif cmd == "cmd|tomorrow_breakfast":
-            tg_edit(chat, mid, format_meal_by_day(1, "breakfast"))
-        elif cmd == "cmd|tomorrow_lunch":
-            tg_edit(chat, mid, format_meal_by_day(1, "lunch"))
-        elif cmd == "cmd|tomorrow_dinner":
-            tg_edit(chat, mid, format_meal_by_day(1, "dinner"))
 
     return "ok"
 
@@ -722,12 +643,12 @@ def cron():
 
     if meal == "breakfast":
         tg_send(format_meal_by_day(0, "breakfast"))
-
     elif meal == "lunch":
         tg_send(format_meal_by_day(0, "lunch"))
-
     elif meal == "dinner":
         tg_send(format_meal_by_day(0, "dinner"))
+    else:
+        return "bad meal", 400
 
     return "ok"
 
