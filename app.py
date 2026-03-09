@@ -5,7 +5,7 @@ import re
 import json
 import requests
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import List, Optional
 
 import cv2
@@ -83,13 +83,6 @@ NOT_MAIN = [
 def kst_now():
     return datetime.utcnow() + timedelta(hours=9)
 
-def today_key():
-    return DAY_KEYS[kst_now().weekday()]
-
-def day_key_with_offset(offset_days: int = 0) -> str:
-    target = (kst_now() + timedelta(days=offset_days)).date()
-    return DAY_KEYS[target.weekday()]
-
 def escape_html(text: str) -> str:
     return (
         str(text)
@@ -98,13 +91,19 @@ def escape_html(text: str) -> str:
         .replace(">", "&gt;")
     )
 
+def safe_int(x, default=0):
+    try:
+        return int(x)
+    except Exception:
+        return default
+
 # =========================================================
 # STORAGE
 # =========================================================
 
 def load_meals():
     if not os.path.exists(MEALS_FILE):
-        return {"days": {}, "range": ""}
+        return {"days": {}, "range": "", "week_start": ""}
     try:
         with open(MEALS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -112,13 +111,40 @@ def load_meals():
             data["days"] = {}
         if "range" not in data:
             data["range"] = ""
+        if "week_start" not in data:
+            data["week_start"] = ""
         return data
     except Exception:
-        return {"days": {}, "range": ""}
+        return {"days": {}, "range": "", "week_start": ""}
 
 def save_meals(data):
     with open(MEALS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+# =========================================================
+# WEEK / DAY RESOLUTION
+# =========================================================
+
+def get_active_day_key(offset_days: int = 0) -> str:
+    """
+    저장된 식단표의 week_start 기준으로 오늘/내일의 요일 키를 계산.
+    저장값이 없거나 파싱 실패 시 현재 실제 요일 fallback.
+    """
+    data = load_meals()
+    week_start_str = data.get("week_start", "")
+
+    if week_start_str:
+        try:
+            ws = date.fromisoformat(week_start_str)
+            target = (kst_now() + timedelta(days=offset_days)).date()
+            delta = (target - ws).days
+            delta = max(0, min(6, delta))
+            return DAY_KEYS[delta]
+        except Exception:
+            pass
+
+    target = (kst_now() + timedelta(days=offset_days)).date()
+    return DAY_KEYS[target.weekday()]
 
 # =========================================================
 # TELEGRAM
@@ -406,7 +432,7 @@ def analyze_lunch_box(lunch_img: Image.Image):
     }
 
 # =========================================================
-# DATE HEADER
+# DATE HEADER / WEEK START
 # =========================================================
 
 def extract_mmdd_from_text(text):
@@ -423,7 +449,7 @@ def extract_mmdd_from_text(text):
 
     return None
 
-def build_range(date_boxes, img, client):
+def build_range_and_week_start(date_boxes, img, client):
     dates = {}
 
     for dk, box in zip(DAY_KEYS, date_boxes):
@@ -434,12 +460,16 @@ def build_range(date_boxes, img, client):
             dates[dk] = mmdd
 
     if "mon" not in dates:
-        return ""
+        return "", ""
 
     mon = dates["mon"]
     sun = dates.get("sun", mon)
 
-    return f"{mon[0]}/{mon[1]}(월) ~ {sun[0]}/{sun[1]}(일)"
+    year = kst_now().year
+    week_start = f"{year:04d}-{safe_int(mon[0]):02d}-{safe_int(mon[1]):02d}"
+    meal_range = f"{mon[0]}/{mon[1]}(월) ~ {sun[0]}/{sun[1]}(일)"
+
+    return meal_range, week_start
 
 # =========================================================
 # PARSE WEEK IMAGE
@@ -454,7 +484,7 @@ def parse_week(image_bytes):
     lunch_boxes = crop_boxes(img, Y_LUNCH_REL)
     dinner_boxes = crop_boxes(img, Y_DINNER_REL)
 
-    meal_range = build_range(date_boxes, img, client)
+    meal_range, week_start = build_range_and_week_start(date_boxes, img, client)
 
     days = {}
 
@@ -494,6 +524,7 @@ def parse_week(image_bytes):
 
     return {
         "range": meal_range,
+        "week_start": week_start,
         "days": days
     }
 
@@ -503,7 +534,7 @@ def parse_week(image_bytes):
 
 def format_lunch_by_day(day_offset: int):
     data = load_meals()
-    dk = day_key_with_offset(day_offset)
+    dk = get_active_day_key(day_offset)
     day = data.get("days", {}).get(dk, {})
     lunch = day.get("lunch", {})
     rng = data.get("range", "")
@@ -527,7 +558,7 @@ def format_lunch_by_day(day_offset: int):
 
 def format_meal_by_day(day_offset: int, meal: str):
     data = load_meals()
-    dk = day_key_with_offset(day_offset)
+    dk = get_active_day_key(day_offset)
     day = data.get("days", {}).get(dk, {})
     rng = data.get("range", "")
 
@@ -640,6 +671,10 @@ def cron():
         return "forbidden", 403
 
     meal = request.args.get("meal")
+
+    data = load_meals()
+    if not data.get("days"):
+        return "menu_not_ready", 200
 
     if meal == "breakfast":
         tg_send(format_meal_by_day(0, "breakfast"))
